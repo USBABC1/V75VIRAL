@@ -2,7 +2,6 @@ import { Hono } from "hono";
 import { cors } from "hono/cors";
 import { zValidator } from "@hono/zod-validator";
 import { SearchRequestSchema } from "../shared/types";
-import { serve } from '@hono/node-server';
 
 // NOTE: This worker is designed to run in a Node.js environment.
 // It uses Node.js APIs for file system access (`fs/promises`).
@@ -189,9 +188,9 @@ async function findRealViralImages(env: Env, options: {
   for (const platform of platforms) {
     try {
       console.log(`Searching ${platform} for viral content...`);
-
-      let platformImages = [];
       
+      let platformImages = [];
+
       if (platform === 'instagram') {
         platformImages = await scrapeInstagramViral(env, query, Math.ceil(max_images / platforms.length));
       } else if (platform === 'facebook') {
@@ -598,13 +597,3 @@ function calculateRealSummary(images: any[]) {
 }
 
 export default app;
-
-// This allows the server to be run directly for local testing
-if (process.env.NODE_ENV !== 'production') {
-    const port = 8787;
-    console.log(`Server is running on port ${port}`);
-    serve({
-        fetch: app.fetch,
-        port: port
-    });
-}

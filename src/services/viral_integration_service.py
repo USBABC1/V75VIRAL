@@ -57,31 +57,138 @@ class ViralIntegrationService:
             "platforms": platforms
         }
         
-        try:
-            async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=self.timeout)) as session:
-                async with session.post(
-                    f"{self.viral_worker_url}/api/search",
-                    json=search_payload,
-                    headers={'Content-Type': 'application/json'}
-                ) as response:
+        # Primeiro tenta verificar se o serviço viral está disponível
+        if not await self._check_viral_service_health():
+            logger.warning("⚠️ Serviço viral não disponível, tentando método alternativo")
+            # Tenta método síncrono como fallback
+            return await self._search_viral_sync_fallback(query, session_id, search_payload)
+        
+        # Tenta múltiplas vezes com diferentes configurações
+        for attempt in range(self.max_retries):
+            try:
+                # Configuração mais robusta para conexões locais
+                connector = aiohttp.TCPConnector(
+                    limit=10,
+                    limit_per_host=5,
+                    ttl_dns_cache=300,
+                    use_dns_cache=True,
+                    keepalive_timeout=30,
+                    enable_cleanup_closed=True
+                )
+                
+                timeout = aiohttp.ClientTimeout(
+                    total=15,  # Timeout menor
+                    connect=5,
+                    sock_read=10
+                )
+                
+                async with aiohttp.ClientSession(
+                    connector=connector,
+                    timeout=timeout
+                ) as session:
+                    logger.info(f"🔄 Tentativa {attempt + 1}/{self.max_retries} de conexão viral")
                     
-                    if response.status == 200:
-                        result = await response.json()
-                        logger.info(f"✅ Viral search concluída - {len(result.get('images', []))} imagens encontradas")
+                    async with session.post(
+                        f"{self.viral_worker_url}/api/search",
+                        json=search_payload,
+                        headers={
+                            'Content-Type': 'application/json',
+                            'User-Agent': 'V70V1-ViralIntegration/1.0'
+                        }
+                    ) as response:
                         
-                        # Processa e salva imagens localmente
-                        processed_result = await self._process_viral_results(result, session_id)
-                        return processed_result
-                    else:
-                        error_text = await response.text()
-                        logger.error(f"❌ Erro na busca viral: {response.status} - {error_text}")
-                        return self._create_fallback_result(query, session_id)
-                        
-        except asyncio.TimeoutError:
-            logger.error("⏰ Timeout na busca viral")
+                        if response.status == 200:
+                            result = await response.json()
+                            logger.info(f"✅ Viral search concluída - {len(result.get('images', []))} imagens encontradas")
+                            
+                            # Processa e salva imagens localmente
+                            processed_result = await self._process_viral_results(result, session_id)
+                            return processed_result
+                        else:
+                            error_text = await response.text()
+                            logger.error(f"❌ Erro na busca viral (tentativa {attempt + 1}): {response.status} - {error_text}")
+                            
+                            if attempt == self.max_retries - 1:
+                                return self._create_fallback_result(query, session_id)
+                            
+                            # Aguarda antes da próxima tentativa
+                            await asyncio.sleep(2 ** attempt)
+                            continue
+                            
+            except (asyncio.TimeoutError, aiohttp.ClientError) as e:
+                logger.error(f"⏰ Erro de conexão viral (tentativa {attempt + 1}): {e}")
+                if attempt == self.max_retries - 1:
+                    return self._create_fallback_result(query, session_id)
+                await asyncio.sleep(2 ** attempt)
+                continue
+                
+            except Exception as e:
+                logger.error(f"❌ Erro inesperado na integração viral (tentativa {attempt + 1}): {e}")
+                if attempt == self.max_retries - 1:
+                    return self._create_fallback_result(query, session_id)
+                await asyncio.sleep(2 ** attempt)
+                continue
+
+    async def _check_viral_service_health(self) -> bool:
+        """Verifica se o serviço viral está disponível"""
+        try:
+            # Usa requests síncrono para verificação rápida
+            import requests
+            response = requests.get(
+                f"{self.viral_worker_url}/api/searches",
+                timeout=5,
+                headers={'User-Agent': 'V70V1-HealthCheck/1.0'}
+            )
+            
+            if response.status_code in [200, 404]:  # 404 é OK, significa que o serviço está rodando
+                logger.info("✅ Serviço viral está disponível")
+                return True
+            else:
+                logger.warning(f"⚠️ Serviço viral retornou status {response.status_code}")
+                return False
+                
+        except requests.exceptions.ConnectionError:
+            logger.warning("⚠️ Não foi possível conectar ao serviço viral")
+            return False
+        except requests.exceptions.Timeout:
+            logger.warning("⚠️ Timeout ao verificar serviço viral")
+            return False
+        except Exception as e:
+            logger.warning(f"⚠️ Erro ao verificar serviço viral: {e}")
+            return False
+
+    async def _search_viral_sync_fallback(self, query: str, session_id: str, search_payload: Dict[str, Any]) -> Dict[str, Any]:
+        """Método síncrono de fallback para busca viral"""
+        try:
+            logger.info("🔄 Tentando busca viral com método síncrono")
+            
+            import requests
+            response = requests.post(
+                f"{self.viral_worker_url}/api/search",
+                json=search_payload,
+                headers={
+                    'Content-Type': 'application/json',
+                    'User-Agent': 'V70V1-SyncFallback/1.0'
+                },
+                timeout=15
+            )
+            
+            if response.status_code == 200:
+                result = response.json()
+                logger.info(f"✅ Viral search síncrona concluída - {len(result.get('images', []))} imagens encontradas")
+                
+                # Processa e salva imagens localmente
+                processed_result = await self._process_viral_results(result, session_id)
+                return processed_result
+            else:
+                logger.error(f"❌ Erro na busca viral síncrona: {response.status_code} - {response.text}")
+                return self._create_fallback_result(query, session_id)
+                
+        except requests.exceptions.RequestException as e:
+            logger.error(f"❌ Erro de conexão na busca viral síncrona: {e}")
             return self._create_fallback_result(query, session_id)
         except Exception as e:
-            logger.error(f"❌ Erro na integração viral: {e}")
+            logger.error(f"❌ Erro inesperado na busca viral síncrona: {e}")
             return self._create_fallback_result(query, session_id)
 
     async def _process_viral_results(self, viral_result: Dict[str, Any], session_id: str) -> Dict[str, Any]:

@@ -2,8 +2,6 @@ import { Hono } from "hono";
 import { cors } from "hono/cors";
 import { zValidator } from "@hono/zod-validator";
 import { SearchRequestSchema } from "../shared/types";
-import * as fs from 'fs';
-import * as path from 'path';
 
 interface Env {
   SERPER_API_KEY?: string;
@@ -13,18 +11,9 @@ interface Env {
   INSTAGRAM_SESSION_COOKIE?: string;
 }
 
-// Local storage paths
-const DATA_DIR = path.join(process.cwd(), '..', '..', 'viral_data');
-const SEARCHES_FILE = path.join(DATA_DIR, 'searches.json');
-const IMAGES_DIR = path.join(DATA_DIR, 'images');
-
-// Ensure directories exist
-if (!fs.existsSync(DATA_DIR)) {
-  fs.mkdirSync(DATA_DIR, { recursive: true });
-}
-if (!fs.existsSync(IMAGES_DIR)) {
-  fs.mkdirSync(IMAGES_DIR, { recursive: true });
-}
+// In-memory storage for the worker environment
+let searchHistory: any[] = [];
+let imageStorage: { [searchId: string]: any[] } = {};
 
 const app = new Hono<{ Bindings: Env }>();
 
@@ -60,13 +49,12 @@ app.post("/api/search", zValidator("json", SearchRequestSchema), async (c) => {
       completed_at: new Date().toISOString()
     };
 
-    // Save search to local file
-    await saveSearchLocally(search);
-
-    // Save images locally
-    for (const image of viralImages) {
-      await saveImageLocally(image, searchId);
-    }
+    // Save search to in-memory storage
+    searchHistory.unshift(search);
+    searchHistory = searchHistory.slice(0, 100); // Keep only last 100
+    
+    // Store images in memory
+    imageStorage[searchId.toString()] = viralImages;
 
     // Calculate real summary metrics
     const summary = calculateRealSummary(viralImages);
@@ -89,7 +77,7 @@ app.post("/api/search", zValidator("json", SearchRequestSchema), async (c) => {
       console.error("Non-Error thrown:", error);
     }
     
-    // Save failed search status locally
+    // Save failed search status in memory
     try {
       if (searchId) {
         const failedSearch = {
@@ -101,7 +89,8 @@ app.post("/api/search", zValidator("json", SearchRequestSchema), async (c) => {
           completed_at: new Date().toISOString(),
           error: error instanceof Error ? error.message : "Unknown error"
         };
-        await saveSearchLocally(failedSearch);
+        searchHistory.unshift(failedSearch);
+        searchHistory = searchHistory.slice(0, 100);
       }
     } catch (saveError) {
       console.error('Failed to save failed search status:', saveError);
@@ -123,8 +112,7 @@ app.post("/api/search", zValidator("json", SearchRequestSchema), async (c) => {
 // Get search history
 app.get("/api/searches", async (c) => {
   try {
-    const searches = await loadSearchesLocally();
-    return c.json(searches.slice(0, 20)); // Return last 20 searches
+    return c.json(searchHistory.slice(0, 20)); // Return last 20 searches
   } catch (error) {
     console.error('Failed to load searches:', error);
     return c.json([]);
@@ -136,14 +124,13 @@ app.get("/api/search/:id", async (c) => {
   const searchId = c.req.param("id");
 
   try {
-    const searches = await loadSearchesLocally();
-    const search = searches.find(s => s.id.toString() === searchId);
+    const search = searchHistory.find(s => s.id.toString() === searchId);
 
     if (!search) {
       return c.json({ error: "Search not found" }, 404);
     }
 
-    const images = await loadImagesLocally(parseInt(searchId));
+    const images = imageStorage[searchId] || [];
     const summary = calculateRealSummary(images);
 
     return c.json({
@@ -157,97 +144,8 @@ app.get("/api/search/:id", async (c) => {
   }
 });
 
-// Local storage functions
-async function saveSearchLocally(search: any) {
-  try {
-    let searches = [];
-    if (fs.existsSync(SEARCHES_FILE)) {
-      const data = fs.readFileSync(SEARCHES_FILE, 'utf8');
-      searches = JSON.parse(data);
-    }
-    
-    // Add new search at the beginning
-    searches.unshift(search);
-    
-    // Keep only last 100 searches
-    searches = searches.slice(0, 100);
-    
-    fs.writeFileSync(SEARCHES_FILE, JSON.stringify(searches, null, 2));
-    console.log(`Search ${search.id} saved locally`);
-  } catch (error) {
-    console.error('Failed to save search locally:', error);
-  }
-}
-
-async function loadSearchesLocally() {
-  try {
-    if (fs.existsSync(SEARCHES_FILE)) {
-      const data = fs.readFileSync(SEARCHES_FILE, 'utf8');
-      return JSON.parse(data);
-    }
-    return [];
-  } catch (error) {
-    console.error('Failed to load searches locally:', error);
-    return [];
-  }
-}
-
-async function saveImageLocally(image: any, searchId: number) {
-  try {
-    const imageFile = path.join(IMAGES_DIR, `search_${searchId}.json`);
-    let images = [];
-    
-    if (fs.existsSync(imageFile)) {
-      const data = fs.readFileSync(imageFile, 'utf8');
-      images = JSON.parse(data);
-    }
-    
-    images.push(image);
-    fs.writeFileSync(imageFile, JSON.stringify(images, null, 2));
-    
-    // Also download and save the actual image file
-    if (image.image_url) {
-      await downloadImageFile(image.image_url, searchId, images.length);
-    }
-    
-    console.log(`Image saved locally for search ${searchId}`);
-  } catch (error) {
-    console.error('Failed to save image locally:', error);
-  }
-}
-
-async function loadImagesLocally(searchId: number) {
-  try {
-    const imageFile = path.join(IMAGES_DIR, `search_${searchId}.json`);
-    if (fs.existsSync(imageFile)) {
-      const data = fs.readFileSync(imageFile, 'utf8');
-      return JSON.parse(data);
-    }
-    return [];
-  } catch (error) {
-    console.error('Failed to load images locally:', error);
-    return [];
-  }
-}
-
-async function downloadImageFile(imageUrl: string, searchId: number, imageIndex: number) {
-  try {
-    const response = await fetch(imageUrl);
-    if (response.ok) {
-      const buffer = await response.arrayBuffer();
-      const ext = imageUrl.split('.').pop()?.split('?')[0] || 'jpg';
-      const filename = `search_${searchId}_image_${imageIndex}.${ext}`;
-      const filepath = path.join(IMAGES_DIR, filename);
-      
-      fs.writeFileSync(filepath, Buffer.from(buffer));
-      console.log(`Image file downloaded: ${filename}`);
-      return filepath;
-    }
-  } catch (error) {
-    console.error('Failed to download image file:', error);
-  }
-  return null;
-}
+// Memory-only functions (no file system operations)
+// All data is stored in memory and will be handled by V70V1 for persistence
 
 // Simplified viral image finder
 async function findSimplifiedViralImages(options: {

@@ -3,22 +3,20 @@ import { cors } from "hono/cors";
 import { zValidator } from "@hono/zod-validator";
 import { SearchRequestSchema } from "../shared/types";
 
-// NOTE: This worker is designed to run in a Node.js environment.
-// It uses Node.js APIs for file system access (`fs/promises`).
-// This will not run in a standard Cloudflare Worker environment without modification.
-import fs from 'fs/promises';
-import path from 'path';
-import { v4 as uuidv4 } from 'uuid';
-import { fileURLToPath } from 'url';
-import { dirname } from 'path';
+// --- Hono App ---
 
-// --- Local Database Setup ---
-const __filename = fileURLToPath(import.meta.url);
-const __dirname = dirname(__filename);
-const DB_FILE = path.join(__dirname, 'local_viral_db.json');
+interface Env {
+  // Database bindings are no longer used, but other keys are passed through
+  DB?: any;
+  SERPER_API_KEY: string;
+  APIFY_API_KEY: string;
+  OPENROUTER_API_KEY: string;
+  FIRECRAWL_API_KEY: string;
+  INSTAGRAM_SESSION_COOKIE: string;
+}
 
 interface ViralImage {
-  search_id: string;
+  search_id: string; // This will just be a transient ID for the request
   image_url: string;
   post_url: string;
   platform: string;
@@ -35,68 +33,19 @@ interface ViralImage {
   hashtags: string[];
 }
 
-interface SearchRecord {
-  id: string;
-  query: string;
-  status: 'processing' | 'completed' | 'failed';
-  total_results: number;
-  created_at: string;
-  completed_at?: string;
-  images: ViralImage[];
-}
-
-interface LocalDatabase {
-  searches: SearchRecord[];
-}
-
-async function readDb(): Promise<LocalDatabase> {
-  try {
-    await fs.access(DB_FILE);
-    const data = await fs.readFile(DB_FILE, 'utf-8');
-    return JSON.parse(data) as LocalDatabase;
-  } catch (error) {
-    // If the file doesn't exist, return a default structure
-    return { searches: [] };
-  }
-}
-
-async function writeDb(data: LocalDatabase): Promise<void> {
-  await fs.writeFile(DB_FILE, JSON.stringify(data, null, 2), 'utf-8');
-}
-
-
-// --- Hono App ---
-
-interface Env {
-  // We no longer use D1, but keep the bindings for other keys
-  DB?: any; // Optional D1 binding
-  SERPER_API_KEY: string;
-  APIFY_API_KEY: string;
-  OPENROUTER_API_KEY: string;
-  FIRECRAWL_API_KEY: string;
-  INSTAGRAM_SESSION_COOKIE: string;
-}
 
 const app = new Hono<{ Bindings: Env }>();
 
 app.use("*", cors());
 
-// Real viral image search endpoint
+// This is the primary endpoint. It performs the search and returns the results.
+// It is now STATELESS and does not save anything.
 app.post("/api/search", zValidator("json", SearchRequestSchema), async (c) => {
   const { query, max_images, min_engagement, platforms } = c.req.valid("json");
-  const searchId = uuidv4();
-
-  const newSearch: SearchRecord = {
-    id: searchId,
-    query,
-    status: 'processing',
-    total_results: 0,
-    created_at: new Date().toISOString(),
-    images: []
-  };
+  const searchId = `search_${Date.now()}`; // A simple transient ID
 
   try {
-    console.log(`Starting viral search for query: "${query}" with platforms: ${platforms.join(', ')}`);
+    console.log(`Starting stateless viral search for query: "${query}"`);
 
     const viralImages = await findRealViralImages(c.env, {
       query,
@@ -106,36 +55,24 @@ app.post("/api/search", zValidator("json", SearchRequestSchema), async (c) => {
       searchId
     });
 
-    newSearch.images = viralImages;
-    newSearch.status = 'completed';
-    newSearch.total_results = viralImages.length;
-    newSearch.completed_at = new Date().toISOString();
-
-    const db = await readDb();
-    db.searches.unshift(newSearch); // Add to the beginning of the list
-    await writeDb(db);
-
     const summary = calculateRealSummary(viralImages);
 
+    // The entire result is returned to the Python caller
+    // The Python service is responsible for saving/persisting this data
     return c.json({
-      search: { ...newSearch, images: undefined }, // Don't return all images in the search object
+      search: {
+        id: searchId,
+        query,
+        status: 'completed',
+        total_results: viralImages.length,
+        created_at: new Date().toISOString(),
+      },
       images: viralImages,
       summary
     });
 
   } catch (error) {
     console.error("Search error:", error);
-    newSearch.status = 'failed';
-    newSearch.completed_at = new Date().toISOString();
-    
-    try {
-        const db = await readDb();
-        db.searches.unshift(newSearch);
-        await writeDb(db);
-    } catch (dbError) {
-        console.error('Failed to write failed search status to local db:', dbError);
-    }
-
     return c.json({ 
       error: "Failed to find viral content", 
       details: error instanceof Error ? error.message : "Unknown error",
@@ -144,33 +81,20 @@ app.post("/api/search", zValidator("json", SearchRequestSchema), async (c) => {
   }
 });
 
-// Get search history
+// The history and specific search endpoints are no longer possible without a database.
+// They will now return a "Not Implemented" message.
 app.get("/api/searches", async (c) => {
-  const db = await readDb();
-  // Return search records without the images array for performance
-  const searchHistory = db.searches.map(s => ({...s, images: undefined}));
-  return c.json(searchHistory);
-});
-
-// Get search results by ID
-app.get("/api/search/:id", async (c) => {
-  const searchId = c.req.param("id");
-  const db = await readDb();
-
-  const search = db.searches.find(s => s.id === searchId);
-
-  if (!search) {
-    return c.json({ error: "Search not found" }, 404);
-  }
-
-  const summary = calculateRealSummary(search.images);
-
   return c.json({
-    search: {...search, images: undefined},
-    images: search.images,
-    summary
-  });
+    message: "History is not available in local-only mode. The Python backend is responsible for storing results."
+  }, 501); // 501 Not Implemented
 });
+
+app.get("/api/search/:id", async (c) => {
+    return c.json({
+        message: "Fetching specific search results by ID is not available in local-only mode."
+    }, 501); // 501 Not Implemented
+});
+
 
 // Real viral image finder using multiple APIs
 async function findRealViralImages(env: Env, options: {
@@ -385,7 +309,7 @@ async function analyzeRealEngagement(env: Env, imageData: any, platform: string)
       author: realMetrics.author || aiAnalysis.author || 'Unknown',
       author_followers: realMetrics.author_followers || aiAnalysis.estimated_followers || 0,
       post_date: realMetrics.post_date || new Date().toISOString(),
-      hashtags: realMetrics.hashtags || aiAnalysis.hashtags || []
+      hashtags: aiAnalysis.hashtags || []
     };
   } catch (error) {
     console.error('Engagement analysis failed for post:', imageData.id, error);

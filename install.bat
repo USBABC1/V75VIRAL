@@ -147,7 +147,7 @@ if errorlevel 1 (
 )
 
 echo Executando npm install...
-npm install
+npm install --legacy-peer-deps
 if errorlevel 1 (
     echo ❌ ERRO: Falha ao instalar dependências do viral!
     echo ⚠️ CONTINUANDO SEM MÓDULO VIRAL...

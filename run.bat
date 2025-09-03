@@ -88,6 +88,27 @@ if not exist "..\viral" (
 REM Inicia o módulo viral em background
 echo 🔄 Iniciando módulo viral em background...
 cd ..\viral
+
+REM Verifica se node_modules existe, se nao, instala dependencias
+if not exist "node_modules" (
+    echo Instalando dependencias do viral...
+    echo Executando npm install...
+    npm install --legacy-peer-deps
+    if errorlevel 1 (
+        echo AVISO: Falha na instalacao das dependencias do viral
+        echo Tentando com npm install --force...
+        npm install --force
+        if errorlevel 1 (
+            echo ERRO: Nao foi possivel instalar dependencias do viral
+            echo Continuando sem modulo viral (usando fallback)
+            set VIRAL_AVAILABLE=false
+            cd ..\src
+            goto START_V70V1
+        )
+    )
+    echo Dependencias do viral instaladas com sucesso
+)
+
 start /B cmd /c "npm run dev > viral.log 2>&1"
 if errorlevel 1 (
     echo ⚠️ AVISO: Falha ao iniciar módulo viral - usando fallback
@@ -100,7 +121,7 @@ cd ..\src
 
 REM Aguarda alguns segundos para o viral inicializar
 echo 🔄 Aguardando inicialização do módulo viral...
-timeout /t 3 /nobreak >nul
+timeout /t 5 /nobreak >nul
 
 :START_V70V1
 REM === INICIALIZAÇÃO DO V70V1 ===

@@ -8,6 +8,8 @@ export default defineConfig({
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   plugins: [...mochaPlugins(process.env as any), react(), cloudflare()],
   server: {
+    port: 8787,
+    host: '0.0.0.0',
     allowedHosts: true,
   },
   build: {

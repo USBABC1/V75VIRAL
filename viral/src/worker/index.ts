@@ -10,8 +10,12 @@ import { serve } from '@hono/node-server';
 import fs from 'fs/promises';
 import path from 'path';
 import { v4 as uuidv4 } from 'uuid';
+import { fileURLToPath } from 'url';
+import { dirname } from 'path';
 
 // --- Local Database Setup ---
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = dirname(__filename);
 const DB_FILE = path.join(__dirname, 'local_viral_db.json');
 
 interface ViralImage {

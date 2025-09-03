@@ -145,7 +145,6 @@ redis>=4.5.0
 # Compatibility fixes for Python 3.12
 typing-extensions>=4.8.0
 pydantic>=2.0.0
-chromedriver==2.24.1
 
 
 playwright
